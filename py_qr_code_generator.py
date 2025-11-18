@@ -1,3 +1,6 @@
+# Copyright [2025] [ecki]
+# SPDX-License-Identifier: Apache-2.0
+
 import PIL.ImageQt
 import PyQt6.QtGui
 import PyQt6.QtWidgets

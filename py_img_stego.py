@@ -1,3 +1,6 @@
+# Copyright [2025] [ecki]
+# SPDX-License-Identifier: Apache-2.0
+
 # py_img_stego_updated.py
 from PIL import Image
 import zlib, struct, hashlib, io, random

@@ -1,0 +1,15 @@
+# Image Processing
+Pillow>=10.0.0
+
+# Numerical Computing
+numpy>=1.24.0
+
+# GUI Framework
+PyQt6>=6.5.0
+
+# Error Correction (for py_text_2_img.py)
+reedsolo>=1.7.0
+
+# Optional: Advanced Image Processing (if needed later)
+# opencv-python>=4.8.0
+# imagehash>=4.3.0
