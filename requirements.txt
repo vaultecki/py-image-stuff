@@ -10,6 +10,11 @@ PyQt6>=6.5.0
 # Error Correction (for py_text_2_img.py)
 reedsolo>=1.7.0
 
-# Optional: Advanced Image Processing (if needed later)
-# opencv-python>=4.8.0
-# imagehash>=4.3.0
+# Computer Vision (for py_img_compare.py enhanced features)
+opencv-python>=4.8.0
+
+# Image Metrics (for SSIM)
+scikit-image>=0.21.0
+
+# PDF Generation (for comparison reports)
+reportlab>=4.0

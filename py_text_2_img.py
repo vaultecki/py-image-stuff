@@ -14,7 +14,7 @@ from PIL import Image
 
 
 class ReedSolomonCodec:
-    """Simple Reed-Solomon error correction codec"""
+    """Reed-Solomon error correction codec - REQUIRED"""
 
     def __init__(self, nsym=10):
         """
@@ -24,30 +24,19 @@ class ReedSolomonCodec:
             nsym: Number of error correction symbols (default: 10 bytes)
         """
         self.nsym = nsym
-        try:
-            from reedsolo import RSCodec
-            self.rsc = RSCodec(nsym)
-            self.available = True
-        except ImportError:
-            self.rsc = None
-            self.available = False
-            print("Warning: reedsolo not installed. Error correction disabled.")
-            print("Install with: pip install reedsolo")
+        from reedsolo import RSCodec
+        self.rsc = RSCodec(nsym)
 
     def encode(self, data):
         """Add error correction to data"""
-        if self.available:
-            return self.rsc.encode(data)
-        return data
+        return self.rsc.encode(data)
 
     def decode(self, data):
         """Decode and correct errors in data"""
-        if self.available:
-            try:
-                return self.rsc.decode(data)[0]
-            except Exception as e:
-                raise ValueError(f"Error correction failed: {e}")
-        return data
+        try:
+            return self.rsc.decode(data)[0]
+        except Exception as e:
+            raise ValueError(f"Error correction failed: {e}")
 
 
 class DataImageEncoder:
@@ -58,7 +47,7 @@ class DataImageEncoder:
     No Base64 encoding - direct binary storage.
     """
 
-    # Header format: MAGIC (4 bytes) + FLAGS (1 byte) + RESERVED (3 bytes) + 
+    # Header format: MAGIC (4 bytes) + FLAGS (1 byte) + RESERVED (3 bytes) +
     #                DATA_LENGTH (4 bytes) + CRC32 (4 bytes) = 16 bytes
     MAGIC = b'DATA'
     HEADER_SIZE = 16
@@ -70,16 +59,14 @@ class DataImageEncoder:
     FLAG_RESERVED_2 = 0x04  # Bit 2: Reserved
     FLAG_RESERVED_3 = 0x08  # Bit 3: Reserved
 
-    def __init__(self, error_correction=True, ecc_symbols=10):
+    def __init__(self, ecc_symbols=10):
         """
-        Initialize encoder
+        Initialize encoder (Reed-Solomon error correction is mandatory)
 
         Args:
-            error_correction: Enable Reed-Solomon error correction
             ecc_symbols: Number of error correction symbols (default: 10)
         """
-        self.error_correction = error_correction
-        self.rs_codec = ReedSolomonCodec(ecc_symbols) if error_correction else None
+        self.rs_codec = ReedSolomonCodec(ecc_symbols)
 
     def calculate_image_size(self, data_length):
         """
@@ -124,21 +111,15 @@ class DataImageEncoder:
 
         original_length = len(data)
 
-        # Apply error correction if enabled
-        if self.error_correction and self.rs_codec.available:
-            encoded_data = self.rs_codec.encode(data)
-            ecc_overhead = len(encoded_data) - len(data)
-        else:
-            encoded_data = data
-            ecc_overhead = 0
+        # Apply Reed-Solomon error correction (always enabled)
+        encoded_data = self.rs_codec.encode(data)
+        ecc_overhead = len(encoded_data) - len(data)
 
         # Calculate CRC32 checksum (on final encoded data)
         crc = zlib.crc32(encoded_data) & 0xFFFFFFFF
 
-        # Create flags byte
-        flags = 0
-        if self.error_correction and self.rs_codec.available:
-            flags |= self.FLAG_ERROR_CORRECTION
+        # Create flags byte (error correction always enabled)
+        flags = self.FLAG_ERROR_CORRECTION
 
         # Create header
         header = (
@@ -168,11 +149,11 @@ class DataImageEncoder:
             'original_data_bytes': original_length,
             'encoded_bytes': len(encoded_data),
             'ecc_overhead_bytes': ecc_overhead,
+            'ecc_symbols': self.rs_codec.nsym,
             'total_bytes_with_header': len(full_data),
             'pixels_used': math.ceil(len(full_data) / self.BYTES_PER_PIXEL),
             'total_pixels': img_size[0] * img_size[1],
             'efficiency': f"{(len(full_data) / (img_size[0] * img_size[1] * 3)) * 100:.1f}%",
-            'error_correction': self.error_correction and self.rs_codec.available,
             'crc32': f"{crc:08X}"
         }
 
@@ -214,6 +195,12 @@ class DataImageEncoder:
         flags = byte_array[4]
         has_ecc = bool(flags & self.FLAG_ERROR_CORRECTION)
 
+        if not has_ecc:
+            raise ValueError(
+                "Image does not have error correction! "
+                "This encoder requires Reed-Solomon error correction."
+            )
+
         data_length = struct.unpack('<I', bytes(byte_array[8:12]))[0]
         stored_crc = struct.unpack('<I', bytes(byte_array[12:16]))[0]
 
@@ -235,26 +222,18 @@ class DataImageEncoder:
                 f"Expected: {stored_crc:08X}, Got: {calculated_crc:08X}"
             )
 
-        # Apply error correction if it was used
-        if has_ecc:
-            if not self.rs_codec or not self.rs_codec.available:
-                raise ValueError(
-                    "Image has error correction but reedsolo is not installed! "
-                    "Install with: pip install reedsolo"
-                )
-            try:
-                decoded_data = self.rs_codec.decode(data_bytes)
-            except Exception as e:
-                raise ValueError(f"Error correction failed: {e}")
-        else:
-            decoded_data = data_bytes
+        # Apply Reed-Solomon error correction (always enabled)
+        try:
+            decoded_data = self.rs_codec.decode(data_bytes)
+        except Exception as e:
+            raise ValueError(f"Error correction failed: {e}")
 
         # Metadata
         metadata = {
             'image_size': f"{width}x{height}",
             'decoded_bytes': len(decoded_data),
             'encoded_bytes': data_length,
-            'error_correction_used': has_ecc,
+            'ecc_symbols': self.rs_codec.nsym,
             'crc32': f"{stored_crc:08X}",
             'crc_valid': True
         }
@@ -314,13 +293,9 @@ class DataImageEncoder:
         total_bytes = total_pixels * self.BYTES_PER_PIXEL
         usable_bytes = total_bytes - self.HEADER_SIZE
 
-        # Account for error correction overhead if enabled
-        if self.error_correction and self.rs_codec and self.rs_codec.available:
-            ecc_overhead = self.rs_codec.nsym
-            usable_data = usable_bytes - ecc_overhead
-        else:
-            ecc_overhead = 0
-            usable_data = usable_bytes
+        # Account for Reed-Solomon error correction overhead
+        ecc_overhead = self.rs_codec.nsym
+        usable_data = usable_bytes - ecc_overhead
 
         return {
             'image_size': f"{width}x{height}",
@@ -328,6 +303,7 @@ class DataImageEncoder:
             'total_bytes': total_bytes,
             'usable_bytes': usable_bytes,
             'ecc_overhead': ecc_overhead,
+            'ecc_symbols': self.rs_codec.nsym,
             'usable_data_bytes': max(0, usable_data),
             'usable_kb': f"{max(0, usable_data) / 1024:.2f} KB",
             'header_overhead': self.HEADER_SIZE
@@ -338,13 +314,11 @@ def demo():
     """Demonstrate usage"""
     print("=== Data to Image Encoder Demo ===\n")
 
-    # Create encoder with error correction
-    encoder = DataImageEncoder(error_correction=True, ecc_symbols=10)
+    # Create encoder (error correction is mandatory)
+    encoder = DataImageEncoder(ecc_symbols=10)
 
-    if encoder.rs_codec and encoder.rs_codec.available:
-        print("✓ Reed-Solomon error correction: ENABLED")
-    else:
-        print("⚠ Reed-Solomon error correction: DISABLED (reedsolo not installed)")
+    print("✓ Reed-Solomon error correction: ENABLED (mandatory)")
+    print(f"  ECC symbols: {encoder.rs_codec.nsym}")
     print()
 
     # Test data
@@ -354,12 +328,12 @@ def demo():
 
     Features:
     - NO Base64 encoding (33% overhead removed!)
-    - Reed-Solomon error correction
+    - Reed-Solomon error correction (MANDATORY)
     - CRC32 checksum
     - Full 8-bit per channel encoding
     - Automatic image sizing
 
-    Direct binary storage for maximum efficiency!
+    Direct binary storage with guaranteed error correction!
     """
 
     print(f"Original text ({len(test_text)} characters, {len(test_text.encode('utf-8'))} bytes):\n")
@@ -420,51 +394,41 @@ def demo():
     print("\n" + "=" * 60)
     print("\nTesting error correction...")
 
-    if encoder.rs_codec and encoder.rs_codec.available:
-        # Simulate corruption
-        img_corrupted = Image.open('data_binary.png')
-        pixels = img_corrupted.load()
-        width, height = img_corrupted.size
+    # Simulate corruption
+    img_corrupted = Image.open('data_binary.png')
+    pixels = img_corrupted.load()
+    width, height = img_corrupted.size
 
-        # Corrupt some pixels (change 5 random pixels)
-        import random
-        corrupted_pixels = []
-        for _ in range(5):
-            x, y = random.randint(0, width - 1), random.randint(0, height - 1)
-            old_val = pixels[x, y]
-            pixels[x, y] = (255 - old_val[0], 255 - old_val[1], 255 - old_val[2])
-            corrupted_pixels.append((x, y))
+    # Corrupt some pixels (change 5 random pixels)
+    import random
+    corrupted_pixels = []
+    for _ in range(5):
+        x, y = random.randint(0, width - 1), random.randint(0, height - 1)
+        old_val = pixels[x, y]
+        pixels[x, y] = (255 - old_val[0], 255 - old_val[1], 255 - old_val[2])
+        corrupted_pixels.append((x, y))
 
-        img_corrupted.save('data_binary_corrupted.png')
-        print(f"Corrupted {len(corrupted_pixels)} pixels")
+    img_corrupted.save('data_binary_corrupted.png')
+    print(f"Corrupted {len(corrupted_pixels)} pixels at: {corrupted_pixels}")
 
-        try:
-            decoded_corrupted, _ = encoder.decode('data_binary_corrupted.png')
-            if binary_data == decoded_corrupted:
-                print("✓ SUCCESS: Error correction recovered corrupted data!")
-            else:
-                print("⚠ PARTIAL: Data differs but was decoded")
-        except Exception as e:
-            print(f"✗ ERROR: Could not recover: {e}")
-    else:
-        print("⚠ Error correction test skipped (reedsolo not installed)")
+    try:
+        decoded_corrupted, _ = encoder.decode('data_binary_corrupted.png')
+        if binary_data == decoded_corrupted:
+            print("✓ SUCCESS: Error correction recovered all corrupted data!")
+        else:
+            print("⚠ PARTIAL: Data differs but was decoded")
+    except Exception as e:
+        print(f"✗ ERROR: Could not recover: {e}")
 
-    # Capacity comparison
+    # Capacity examples
     print("\n" + "=" * 60)
-    print("\nCapacity comparison (with/without error correction):")
-    print("\nWith error correction:")
-    for size in [(100, 100), (500, 500), (1000, 1000)]:
+    print("\nCapacity with Reed-Solomon error correction:")
+    for size in [(100, 100), (500, 500), (1000, 1000), (1920, 1080)]:
         capacity = encoder.get_capacity(size)
         print(f"\n{capacity['image_size']}:")
         print(f"  Usable data: {capacity['usable_kb']}")
         print(f"  ECC overhead: {capacity['ecc_overhead']} bytes")
-
-    print("\nWithout error correction:")
-    encoder_no_ecc = DataImageEncoder(error_correction=False)
-    for size in [(100, 100), (500, 500), (1000, 1000)]:
-        capacity = encoder_no_ecc.get_capacity(size)
-        print(f"\n{capacity['image_size']}:")
-        print(f"  Usable data: {capacity['usable_kb']}")
+        print(f"  Total capacity: {capacity['usable_bytes']} bytes")
 
 
 def main():
