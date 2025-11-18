@@ -3,9 +3,13 @@
 
 # -*- coding: utf-8 -*-
 """
-Image Marker Tool
+Image Marker Tool - Enhanced Version
 Interactive tool for marking and annotating points on images.
-Supports relative coordinates for scalability.
+Features:
+- Marker categories/tags with custom colors
+- Text labels on markers
+- Relative coordinate system (resolution-independent)
+- CSV and JSON export
 """
 import json
 import os
@@ -59,33 +63,106 @@ class ZoomableImageView(QtWidgets.QGraphicsView):
         super().keyReleaseEvent(event)
 
 
+class MarkerCategory:
+    """Defines a marker category with name and color"""
+
+    # Default categories
+    DEFAULTS = {
+        'defect': {'name': 'Defect', 'color': '#FF0000', 'description': 'Product defects'},
+        'measurement': {'name': 'Measurement', 'color': '#00FF00', 'description': 'Measurement points'},
+        'note': {'name': 'Note', 'color': '#0000FF', 'description': 'General notes'},
+        'roi': {'name': 'ROI', 'color': '#FFFF00', 'description': 'Region of interest'},
+        'annotation': {'name': 'Annotation', 'color': '#FF00FF', 'description': 'Annotations'},
+    }
+
+    def __init__(self, id, name, color, description=''):
+        self.id = id
+        self.name = name
+        self.color = QtGui.QColor(color) if isinstance(color, str) else color
+        self.description = description
+
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'name': self.name,
+            'color': self.color.name(),
+            'description': self.description
+        }
+
+    @staticmethod
+    def from_dict(data):
+        """Create from dictionary"""
+        return MarkerCategory(
+            data['id'],
+            data['name'],
+            data['color'],
+            data.get('description', '')
+        )
+
+
 class MarkerManager:
-    """Manages markers and their storage with relative coordinates"""
+    """Manages markers and their storage with relative coordinates and categories"""
 
     def __init__(self):
         self.markers = []
+        self.categories = self._load_default_categories()
         self.config_dir = Path("config")
         self.config_dir.mkdir(exist_ok=True)
         self.image_width = 1
         self.image_height = 1
+
+    def _load_default_categories(self):
+        """Load default marker categories"""
+        categories = {}
+        for cat_id, cat_data in MarkerCategory.DEFAULTS.items():
+            categories[cat_id] = MarkerCategory(
+                cat_id,
+                cat_data['name'],
+                cat_data['color'],
+                cat_data['description']
+            )
+        return categories
+
+    def add_category(self, id, name, color, description=''):
+        """Add a new category"""
+        self.categories[id] = MarkerCategory(id, name, color, description)
+
+    def get_category(self, category_id):
+        """Get category by ID"""
+        return self.categories.get(category_id, self.categories['note'])
 
     def set_image_dimensions(self, width, height):
         """Set current image dimensions for coordinate conversion"""
         self.image_width = max(1, width)
         self.image_height = max(1, height)
 
-    def add_marker(self, x, y, label=""):
-        """Add a new marker with both relative and absolute coordinates"""
+    def add_marker(self, x, y, category_id='note', label='', description=''):
+        """Add a new marker with category, label, and relative coordinates"""
         marker = {
             'x_rel': float(x / self.image_width),  # Relative (0-1)
             'y_rel': float(y / self.image_height),  # Relative (0-1)
-            'x_abs': float(x),  # Absolute pixels
-            'y_abs': float(y),  # Absolute pixels
+            'x_abs': float(x),  # Absolute pixels (for current image)
+            'y_abs': float(y),  # Absolute pixels (for current image)
+            'category': category_id,
             'label': label,
+            'description': description,
             'id': len(self.markers)
         }
         self.markers.append(marker)
         return marker
+
+    def update_marker(self, marker_id, label=None, description=None, category=None):
+        """Update marker properties"""
+        if 0 <= marker_id < len(self.markers):
+            if label is not None:
+                self.markers[marker_id]['label'] = label
+            if description is not None:
+                self.markers[marker_id]['description'] = description
+            if category is not None:
+                self.markers[marker_id]['category'] = category
+            return True
+        return False
 
     def get_absolute_coords(self, marker):
         """Get absolute coordinates from relative coordinates"""
@@ -99,6 +176,16 @@ class MarkerManager:
         if self.markers:
             return self.markers.pop()
         return None
+
+    def remove_marker(self, marker_id):
+        """Remove marker by ID"""
+        if 0 <= marker_id < len(self.markers):
+            self.markers.pop(marker_id)
+            # Update remaining IDs
+            for i, marker in enumerate(self.markers):
+                marker['id'] = i
+            return True
+        return False
 
     def remove_all(self):
         """Remove all markers"""
@@ -127,9 +214,13 @@ class MarkerManager:
                     'width': self.image_width,
                     'height': self.image_height
                 },
+                'categories': {
+                    cat_id: cat.to_dict()
+                    for cat_id, cat in self.categories.items()
+                },
                 'markers': self.markers,
                 'count': len(self.markers),
-                'version': '2.0'  # Version with relative coords
+                'version': '3.0'  # Version with categories and labels
             }
 
             with open(filename, 'w', encoding='utf-8') as f:
@@ -162,28 +253,35 @@ class MarkerManager:
             if not isinstance(data, dict) or 'markers' not in data:
                 return False
 
-            # Check version and handle legacy format
+            # Load categories if present
+            if 'categories' in data:
+                self.categories = {}
+                for cat_id, cat_data in data['categories'].items():
+                    self.categories[cat_id] = MarkerCategory.from_dict(cat_data)
+
+            # Check version and handle legacy formats
             version = data.get('version', '1.0')
 
-            if version == '1.0':
-                # Legacy format - convert to relative coordinates
+            if version in ['1.0', '2.0']:
+                # Legacy format - convert to new format
                 self.markers = []
                 for marker in data['markers']:
-                    # Assume old format has absolute coords only
-                    x_abs = marker.get('x', marker.get('x_abs', 0))
-                    y_abs = marker.get('y', marker.get('y_abs', 0))
+                    x_rel = marker.get('x_rel', marker.get('x', 0) / self.image_width)
+                    y_rel = marker.get('y_rel', marker.get('y', 0) / self.image_height)
 
                     new_marker = {
-                        'x_rel': x_abs / self.image_width,
-                        'y_rel': y_abs / self.image_height,
-                        'x_abs': x_abs,
-                        'y_abs': y_abs,
+                        'x_rel': x_rel,
+                        'y_rel': y_rel,
+                        'x_abs': x_rel * self.image_width,
+                        'y_abs': y_rel * self.image_height,
+                        'category': marker.get('category', 'note'),
                         'label': marker.get('label', ''),
+                        'description': marker.get('description', ''),
                         'id': marker.get('id', len(self.markers))
                     }
                     self.markers.append(new_marker)
             else:
-                # New format with relative coordinates
+                # New format with categories and labels
                 self.markers = data['markers']
 
             return True
@@ -207,15 +305,18 @@ class MarkerManager:
 
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("ID,X_Relative,Y_Relative,X_Absolute,Y_Absolute,Label\n")
+                f.write("ID,Category,Label,X_Relative,Y_Relative,X_Absolute,Y_Absolute,Description\n")
                 for marker in self.markers:
+                    category = self.get_category(marker.get('category', 'note'))
                     f.write(
                         f"{marker['id']},"
+                        f"{category.name},"
+                        f'"{marker.get("label", "")}",'
                         f"{marker['x_rel']:.6f},"
                         f"{marker['y_rel']:.6f},"
                         f"{marker['x_abs']:.2f},"
                         f"{marker['y_abs']:.2f},"
-                        f"{marker.get('label', '')}\n"
+                        f'"{marker.get("description", "")}"\n'
                     )
 
             return filename, None
@@ -223,13 +324,80 @@ class MarkerManager:
             return None, f"Error exporting: {e}"
 
 
+class MarkerEditDialog(QtWidgets.QDialog):
+    """Dialog for editing marker properties"""
+
+    def __init__(self, marker, categories, parent=None):
+        super().__init__(parent)
+        self.marker = marker
+        self.categories = categories
+        self.setWindowTitle("Edit Marker")
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        # Category
+        cat_layout = QtWidgets.QHBoxLayout()
+        cat_layout.addWidget(QtWidgets.QLabel("Category:"))
+        self.category_combo = QtWidgets.QComboBox()
+        for cat_id, category in self.categories.items():
+            self.category_combo.addItem(category.name, cat_id)
+
+        # Set current category
+        current_cat = self.marker.get('category', 'note')
+        index = self.category_combo.findData(current_cat)
+        if index >= 0:
+            self.category_combo.setCurrentIndex(index)
+
+        cat_layout.addWidget(self.category_combo)
+        layout.addLayout(cat_layout)
+
+        # Label
+        label_layout = QtWidgets.QHBoxLayout()
+        label_layout.addWidget(QtWidgets.QLabel("Label:"))
+        self.label_input = QtWidgets.QLineEdit()
+        self.label_input.setText(self.marker.get('label', ''))
+        self.label_input.setPlaceholderText("Short label for marker")
+        label_layout.addWidget(self.label_input)
+        layout.addLayout(label_layout)
+
+        # Description
+        layout.addWidget(QtWidgets.QLabel("Description:"))
+        self.description_input = QtWidgets.QTextEdit()
+        self.description_input.setText(self.marker.get('description', ''))
+        self.description_input.setPlaceholderText("Detailed description (optional)")
+        self.description_input.setMaximumHeight(80)
+        layout.addWidget(self.description_input)
+
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        ok_btn = QtWidgets.QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def get_values(self):
+        """Get edited values"""
+        return {
+            'category': self.category_combo.currentData(),
+            'label': self.label_input.text(),
+            'description': self.description_input.toPlainText()
+        }
+
+
 class ImageMarker(QtWidgets.QMainWindow):
     """Main window for image marking"""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Image Marker Tool")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setWindowTitle("Image Marker Tool - Enhanced")
+        self.setGeometry(100, 100, 1400, 900)
 
         # Variables
         self.current_image_path = None
@@ -237,7 +405,7 @@ class ImageMarker(QtWidgets.QMainWindow):
         self.marker_items = []
         self.marker_manager = MarkerManager()
         self.marker_size = 10
-        self.marker_color = QtGui.QColor(0, 255, 0)
+        self.current_category = 'note'
 
         # Build UI
         self.setup_ui()
@@ -265,7 +433,7 @@ class ImageMarker(QtWidgets.QMainWindow):
     def create_sidebar(self):
         """Create sidebar with controls"""
         sidebar = QtWidgets.QWidget()
-        sidebar.setMaximumWidth(250)
+        sidebar.setMaximumWidth(300)
         layout = QtWidgets.QVBoxLayout()
         sidebar.setLayout(layout)
 
@@ -288,6 +456,25 @@ class ImageMarker(QtWidgets.QMainWindow):
 
         layout.addWidget(file_group)
 
+        # Marker category selection
+        category_group = QtWidgets.QGroupBox("Marker Category")
+        category_layout = QtWidgets.QVBoxLayout()
+        category_group.setLayout(category_layout)
+
+        self.category_combo = QtWidgets.QComboBox()
+        for cat_id, category in self.marker_manager.categories.items():
+            self.category_combo.addItem(category.name, cat_id)
+        self.category_combo.currentIndexChanged.connect(self.on_category_changed)
+        category_layout.addWidget(self.category_combo)
+
+        # Category color indicator
+        self.category_color_label = QtWidgets.QLabel("●")
+        self.category_color_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.update_category_color()
+        category_layout.addWidget(self.category_color_label)
+
+        layout.addWidget(category_group)
+
         # Marker operations
         marker_group = QtWidgets.QGroupBox("Markers")
         marker_layout = QtWidgets.QVBoxLayout()
@@ -304,7 +491,7 @@ class ImageMarker(QtWidgets.QMainWindow):
         layout.addWidget(marker_group)
 
         # Marker settings
-        settings_group = QtWidgets.QGroupBox("Settings")
+        settings_group = QtWidgets.QGroupBox("Display Settings")
         settings_layout = QtWidgets.QVBoxLayout()
         settings_group.setLayout(settings_layout)
 
@@ -312,30 +499,40 @@ class ImageMarker(QtWidgets.QMainWindow):
         size_layout = QtWidgets.QHBoxLayout()
         size_layout.addWidget(QtWidgets.QLabel("Size:"))
         self.size_spin = QtWidgets.QSpinBox()
-        self.size_spin.setRange(3, 50)
+        self.size_spin.setRange(5, 50)
         self.size_spin.setValue(10)
         self.size_spin.valueChanged.connect(self.update_marker_size)
         size_layout.addWidget(self.size_spin)
         settings_layout.addLayout(size_layout)
 
-        # Marker color
-        color_layout = QtWidgets.QHBoxLayout()
-        color_layout.addWidget(QtWidgets.QLabel("Color:"))
-        self.color_btn = QtWidgets.QPushButton("🎨")
-        self.color_btn.clicked.connect(self.choose_color)
-        self.update_color_button()
-        color_layout.addWidget(self.color_btn)
-        settings_layout.addLayout(color_layout)
+        # Show labels checkbox
+        self.show_labels_check = QtWidgets.QCheckBox("Show Labels")
+        self.show_labels_check.setChecked(True)
+        self.show_labels_check.stateChanged.connect(self.redraw_all_markers)
+        settings_layout.addWidget(self.show_labels_check)
 
         layout.addWidget(settings_group)
 
-        # Marker list
+        # Marker list with filter
         list_group = QtWidgets.QGroupBox("Marker List")
         list_layout = QtWidgets.QVBoxLayout()
         list_group.setLayout(list_layout)
 
+        # Filter by category
+        filter_layout = QtWidgets.QHBoxLayout()
+        filter_layout.addWidget(QtWidgets.QLabel("Filter:"))
+        self.filter_combo = QtWidgets.QComboBox()
+        self.filter_combo.addItem("All Categories", None)
+        for cat_id, category in self.marker_manager.categories.items():
+            self.filter_combo.addItem(category.name, cat_id)
+        self.filter_combo.currentIndexChanged.connect(self.update_marker_list)
+        filter_layout.addWidget(self.filter_combo)
+        list_layout.addLayout(filter_layout)
+
         self.marker_list = QtWidgets.QListWidget()
-        self.marker_list.itemDoubleClicked.connect(self.jump_to_marker)
+        self.marker_list.itemDoubleClicked.connect(self.edit_marker_from_list)
+        self.marker_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.marker_list.customContextMenuRequested.connect(self.show_marker_context_menu)
         list_layout.addWidget(self.marker_list)
 
         layout.addWidget(list_group)
@@ -367,6 +564,25 @@ class ImageMarker(QtWidgets.QMainWindow):
         # Delete for remove all
         delete_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Delete"), self)
         delete_shortcut.activated.connect(self.remove_all_markers)
+
+        # Number keys 1-5 for quick category selection
+        for i in range(1, 6):
+            if i <= self.category_combo.count():
+                shortcut = QtGui.QShortcut(QtGui.QKeySequence(str(i)), self)
+                shortcut.activated.connect(lambda idx=i - 1: self.category_combo.setCurrentIndex(idx))
+
+    def on_category_changed(self):
+        """Handle category selection change"""
+        self.current_category = self.category_combo.currentData()
+        self.update_category_color()
+
+    def update_category_color(self):
+        """Update category color indicator"""
+        category = self.marker_manager.get_category(self.current_category)
+        color = category.color.name()
+        self.category_color_label.setStyleSheet(
+            f"font-size: 36pt; color: {color};"
+        )
 
     def open_file(self):
         """Open an image"""
@@ -426,61 +642,135 @@ class ImageMarker(QtWidgets.QMainWindow):
         if self.pixmap_item.contains(pos):
             x, y = pos.x(), pos.y()
 
-            # Add marker
-            marker = self.marker_manager.add_marker(x, y)
-            self.draw_marker(marker)
-
-            # Update list
-            self.marker_list.addItem(
-                f"#{marker['id'] + 1}: ({x:.1f}, {y:.1f}) "
-                f"[rel: {marker['x_rel']:.3f}, {marker['y_rel']:.3f}]"
+            # Add marker with current category
+            marker = self.marker_manager.add_marker(
+                x, y,
+                category_id=self.current_category,
+                label=f"M{len(self.marker_manager.markers) + 1}"
             )
 
+            self.draw_marker(marker)
+            self.update_marker_list()
+
             # Update info
+            category = self.marker_manager.get_category(marker['category'])
             self.info_label.setText(
                 f"Markers: {len(self.marker_manager.markers)}\n"
-                f"Last: ({x:.1f}, {y:.1f})"
+                f"Last: {category.name} at ({x:.1f}, {y:.1f})"
             )
 
     def draw_marker(self, marker):
-        """Draw a single marker"""
-        # Get absolute coordinates from relative
+        """Draw a single marker with label"""
+        # Get absolute coordinates and category
         x, y = self.marker_manager.get_absolute_coords(marker)
+        category = self.marker_manager.get_category(marker.get('category', 'note'))
         size = self.marker_size
 
-        # Draw cross
-        pen = QtGui.QPen(self.marker_color, 2)
+        # Create pen with category color
+        pen = QtGui.QPen(category.color, 2)
 
-        # Horizontal line
+        # Draw cross
         h_line = self.scene.addLine(x - size, y, x + size, y, pen)
-        # Vertical line
         v_line = self.scene.addLine(x, y - size, x, y + size, pen)
 
-        # Circle
+        # Draw circle
         circle = self.scene.addEllipse(
             x - size / 2, y - size / 2, size, size,
             pen
         )
 
-        self.marker_items.append((h_line, v_line, circle))
+        # Draw label if enabled and present
+        label_item = None
+        if self.show_labels_check.isChecked() and marker.get('label'):
+            label_item = self.scene.addText(marker['label'])
+            label_item.setDefaultTextColor(category.color)
+            label_item.setFont(QtGui.QFont("Arial", 10, QtGui.QFont.Weight.Bold))
+            label_item.setPos(x + size + 2, y - size)
+
+        self.marker_items.append((h_line, v_line, circle, label_item))
 
     def redraw_all_markers(self):
         """Redraw all markers"""
         # Remove old markers
         for items in self.marker_items:
             for item in items:
-                self.scene.removeItem(item)
+                if item:
+                    self.scene.removeItem(item)
         self.marker_items.clear()
-        self.marker_list.clear()
 
         # Draw new markers
         for marker in self.marker_manager.markers:
             self.draw_marker(marker)
+
+        self.update_marker_list()
+
+    def update_marker_list(self):
+        """Update marker list with optional filtering"""
+        self.marker_list.clear()
+
+        filter_category = self.filter_combo.currentData()
+
+        for marker in self.marker_manager.markers:
+            category = self.marker_manager.get_category(marker.get('category', 'note'))
+
+            # Apply filter
+            if filter_category and marker.get('category') != filter_category:
+                continue
+
             x, y = self.marker_manager.get_absolute_coords(marker)
-            self.marker_list.addItem(
-                f"#{marker['id'] + 1}: ({x:.1f}, {y:.1f}) "
-                f"[rel: {marker['x_rel']:.3f}, {marker['y_rel']:.3f}]"
-            )
+            label = marker.get('label', '')
+
+            # Format list item with color indicator
+            item_text = f"#{marker['id'] + 1} [{category.name}] {label} ({x:.1f}, {y:.1f})"
+            item = QtWidgets.QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, marker['id'])
+            item.setForeground(QtGui.QBrush(category.color))
+            self.marker_list.addItem(item)
+
+    def edit_marker_from_list(self, item):
+        """Edit marker when double-clicked in list"""
+        marker_id = item.data(Qt.ItemDataRole.UserRole)
+        if 0 <= marker_id < len(self.marker_manager.markers):
+            marker = self.marker_manager.markers[marker_id]
+
+            # Show edit dialog
+            dialog = MarkerEditDialog(marker, self.marker_manager.categories, self)
+            if dialog.exec():
+                values = dialog.get_values()
+                self.marker_manager.update_marker(
+                    marker_id,
+                    label=values['label'],
+                    description=values['description'],
+                    category=values['category']
+                )
+                self.redraw_all_markers()
+                self.info_label.setText(f"Marker #{marker_id + 1} updated")
+
+    def show_marker_context_menu(self, pos):
+        """Show context menu for marker"""
+        item = self.marker_list.itemAt(pos)
+        if not item:
+            return
+
+        marker_id = item.data(Qt.ItemDataRole.UserRole)
+
+        menu = QtWidgets.QMenu(self)
+
+        edit_action = menu.addAction("Edit")
+        delete_action = menu.addAction("Delete")
+        jump_action = menu.addAction("Jump to Marker")
+
+        action = menu.exec(self.marker_list.mapToGlobal(pos))
+
+        if action == edit_action:
+            self.edit_marker_from_list(item)
+        elif action == delete_action:
+            self.marker_manager.remove_marker(marker_id)
+            self.redraw_all_markers()
+        elif action == jump_action:
+            marker = self.marker_manager.markers[marker_id]
+            x, y = self.marker_manager.get_absolute_coords(marker)
+            self.view.centerOn(x, y)
 
     def remove_last_marker(self):
         """Remove the last marker"""
@@ -489,10 +779,11 @@ class ImageMarker(QtWidgets.QMainWindow):
             # Remove graphical elements
             items = self.marker_items.pop()
             for item in items:
-                self.scene.removeItem(item)
+                if item:
+                    self.scene.removeItem(item)
 
-            # Remove from list
-            self.marker_list.takeItem(self.marker_list.count() - 1)
+            # Update list
+            self.update_marker_list()
 
             # Update info
             self.info_label.setText(
@@ -525,7 +816,8 @@ class ImageMarker(QtWidgets.QMainWindow):
         else:
             QtWidgets.QMessageBox.information(
                 self, "Saved",
-                f"Markers saved:\n{filename}"
+                f"Markers saved:\n{filename}\n\n"
+                f"Total markers: {len(self.marker_manager.markers)}"
             )
             self.info_label.setText(f"Saved: {filename.name}")
 
@@ -549,30 +841,6 @@ class ImageMarker(QtWidgets.QMainWindow):
         """Update marker size"""
         self.marker_size = value
         self.redraw_all_markers()
-
-    def choose_color(self):
-        """Open color picker dialog"""
-        color = QtWidgets.QColorDialog.getColor(
-            self.marker_color, self, "Choose Marker Color"
-        )
-        if color.isValid():
-            self.marker_color = color
-            self.update_color_button()
-            self.redraw_all_markers()
-
-    def update_color_button(self):
-        """Update the color of the color button"""
-        self.color_btn.setStyleSheet(
-            f"background-color: {self.marker_color.name()}; color: white;"
-        )
-
-    def jump_to_marker(self, item):
-        """Jump to a marker when double-clicked"""
-        index = self.marker_list.row(item)
-        if 0 <= index < len(self.marker_manager.markers):
-            marker = self.marker_manager.markers[index]
-            x, y = self.marker_manager.get_absolute_coords(marker)
-            self.view.centerOn(x, y)
 
 
 def main():
