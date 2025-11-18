@@ -18,3 +18,5 @@ scikit-image>=0.21.0
 
 # PDF Generation (for comparison reports)
 reportlab>=4.0
+
+qrcode[PIL]
