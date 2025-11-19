@@ -9,22 +9,26 @@ Compares two images with multiple methods:
 - Histogram comparison
 - SSIM (Structural Similarity Index)
 - PDF report export
+- JSON export for automation
+- Batch processing support
 """
 import sys
+import json
+import tempfile
 from datetime import datetime
 from pathlib import Path
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import cv2
 from skimage.metrics import structural_similarity as ssim
-from PyQt6.QtGui import QPixmap, QImage, QPen, QColor, QBrush
+from PyQt6.QtGui import QPixmap, QImage, QPen, QColor, QBrush, QAction
 from PyQt6.QtCore import Qt, QRectF, QThread, pyqtSignal
 from PyQt6.QtWidgets import (QMainWindow, QApplication, QWidget,
                              QFileDialog, QHBoxLayout, QVBoxLayout,
                              QPushButton, QGraphicsView, QGraphicsScene,
                              QGraphicsPixmapItem, QLabel, QSpinBox,
                              QMessageBox, QProgressBar, QComboBox,
-                             QCheckBox, QGroupBox)
+                             QCheckBox, QGroupBox, QMenuBar, QMenu)
 
 
 class ZoomableGraphicsView(QGraphicsView):
@@ -185,7 +189,7 @@ class ImageComparator:
         self.ssim_image = diff
 
     def find_differences_opencv(self):
-        """Find differences using OpenCV (much faster than flood fill)"""
+        """Find differences using OpenCV"""
         # Convert to grayscale
         gray1 = cv2.cvtColor(self.img1_cv, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(self.img2_cv, cv2.COLOR_BGR2GRAY)
@@ -196,7 +200,7 @@ class ImageComparator:
         # Apply threshold
         _, thresh = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
 
-        # Find contours (OpenCV is much faster than manual flood fill)
+        # Find contours
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         # Process contours
@@ -234,20 +238,42 @@ class ImageComparator:
                     diff['x'] + diff['width'],
                     diff['y'] + diff['height']
                 ],
-                fill=(255, 0, 0, 80),  # Red with 80/255 transparency
+                fill=(255, 0, 0, 80),  # Red with transparency
                 outline=(255, 0, 0, 255),  # Solid red border
                 width=3
             )
 
         self.overlay_image = overlay
 
+    def export_json(self, output_path):
+        """Export comparison results as JSON"""
+        data = {
+            'timestamp': datetime.now().isoformat(),
+            'image1': str(Path(self.img1_path).name),
+            'image2': str(Path(self.img2_path).name),
+            'metrics': {
+                'ssim_score': float(self.ssim_score),
+                'histogram_similarity': float(self.histogram_similarity),
+                'difference_regions': len(self.differences),
+                'total_different_pixels': sum(d['area'] for d in self.differences)
+            },
+            'differences': self.differences,
+            'settings': {
+                'threshold': self.threshold,
+                'min_area': self.min_area
+            }
+        }
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+
     def export_pdf_report(self, output_path):
         """Export comparison results as PDF report"""
-        from reportlab.lib.pagesizes import letter, A4
-        from reportlab.lib.units import inch
-        from reportlab.lib.utils import ImageReader
-        from reportlab.pdfgen import canvas
-        from reportlab.lib import colors
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas
+        except ImportError:
+            raise ImportError("reportlab is required for PDF export. Install with: pip install reportlab")
 
         # Create PDF
         c = canvas.Canvas(str(output_path), pagesize=A4)
@@ -282,14 +308,14 @@ class ImageComparator:
 
         y_pos -= 25
         c.setFont("Helvetica", 11)
-        c.drawString(70, y_pos, f"• SSIM Score: {self.ssim_score:.2f}% (higher is more similar)")
+        c.drawString(70, y_pos, f"- SSIM Score: {self.ssim_score:.2f}% (higher is more similar)")
         y_pos -= 20
-        c.drawString(70, y_pos, f"• Histogram Similarity: {self.histogram_similarity:.2f}%")
+        c.drawString(70, y_pos, f"- Histogram Similarity: {self.histogram_similarity:.2f}%")
         y_pos -= 20
-        c.drawString(70, y_pos, f"• Difference Regions: {len(self.differences)}")
+        c.drawString(70, y_pos, f"- Difference Regions: {len(self.differences)}")
         y_pos -= 20
         total_area = sum(d['area'] for d in self.differences)
-        c.drawString(70, y_pos, f"• Total Different Pixels: {total_area:,}")
+        c.drawString(70, y_pos, f"- Total Different Pixels: {total_area:,}")
 
         # Add images section
         y_pos -= 40
@@ -298,51 +324,54 @@ class ImageComparator:
 
         # Calculate image dimensions to fit on page
         img_width = (width - 120) / 2
-        img_height = img_width * 0.75  # Maintain aspect ratio
+        img_height = img_width * 0.75
 
         y_pos -= 30
 
-        # Save temporary images for PDF
-        temp_img1 = Path("temp_img1.png")
-        temp_img2 = Path("temp_img2.png")
-        temp_overlay = Path("temp_overlay.png")
+        # Use temporary files with proper cleanup
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp1, \
+                tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp2, \
+                tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_overlay:
 
-        self.img1.save(temp_img1)
-        self.img2.save(temp_img2)
-        if self.overlay_image:
-            self.overlay_image.save(temp_overlay)
+            temp_img1 = Path(tmp1.name)
+            temp_img2 = Path(tmp2.name)
+            temp_overlay_path = Path(tmp_overlay.name)
 
-        # Add images to PDF
-        try:
-            # Image 1
-            c.drawString(50, y_pos, "Image 1:")
-            c.drawImage(str(temp_img1), 50, y_pos - img_height - 5,
-                        width=img_width, height=img_height, preserveAspectRatio=True)
-
-            # Image 2
-            c.drawString(width / 2 + 10, y_pos, "Image 2:")
-            c.drawImage(str(temp_img2), width / 2 + 10, y_pos - img_height - 5,
-                        width=img_width, height=img_height, preserveAspectRatio=True)
-
-            # New page for overlay
+            self.img1.save(temp_img1)
+            self.img2.save(temp_img2)
             if self.overlay_image:
-                c.showPage()
-                c.setFont("Helvetica-Bold", 14)
-                c.drawString(50, height - 50, "Difference Overlay")
-                c.setFont("Helvetica", 10)
-                c.drawString(50, height - 70, "Red areas indicate detected differences")
+                self.overlay_image.save(temp_overlay_path)
 
-                # Full width overlay
-                overlay_width = width - 100
-                overlay_height = overlay_width * 0.75
-                c.drawImage(str(temp_overlay), 50, height - 100 - overlay_height,
-                            width=overlay_width, height=overlay_height, preserveAspectRatio=True)
+            try:
+                # Image 1
+                c.drawString(50, y_pos, "Image 1:")
+                c.drawImage(str(temp_img1), 50, y_pos - img_height - 5,
+                            width=img_width, height=img_height, preserveAspectRatio=True)
 
-        finally:
-            # Clean up temporary files
-            temp_img1.unlink(missing_ok=True)
-            temp_img2.unlink(missing_ok=True)
-            temp_overlay.unlink(missing_ok=True)
+                # Image 2
+                c.drawString(width / 2 + 10, y_pos, "Image 2:")
+                c.drawImage(str(temp_img2), width / 2 + 10, y_pos - img_height - 5,
+                            width=img_width, height=img_height, preserveAspectRatio=True)
+
+                # New page for overlay
+                if self.overlay_image:
+                    c.showPage()
+                    c.setFont("Helvetica-Bold", 14)
+                    c.drawString(50, height - 50, "Difference Overlay")
+                    c.setFont("Helvetica", 10)
+                    c.drawString(50, height - 70, "Red areas indicate detected differences")
+
+                    # Full width overlay
+                    overlay_width = width - 100
+                    overlay_height = overlay_width * 0.75
+                    c.drawImage(str(temp_overlay_path), 50, height - 100 - overlay_height,
+                                width=overlay_width, height=overlay_height, preserveAspectRatio=True)
+
+            finally:
+                # Clean up temporary files
+                temp_img1.unlink(missing_ok=True)
+                temp_img2.unlink(missing_ok=True)
+                temp_overlay_path.unlink(missing_ok=True)
 
         # Save PDF
         c.save()
@@ -362,7 +391,45 @@ class MainWindow(QMainWindow):
         self.comparator = None
 
         self.setup_ui()
+        self.setup_menu()
         self.showMaximized()
+
+    def setup_menu(self):
+        """Create menu bar"""
+        menubar = self.menuBar()
+
+        # File menu
+        file_menu = menubar.addMenu("File")
+
+        load1_action = QAction("Load Image 1", self)
+        load1_action.triggered.connect(lambda: self.load_image(1))
+        file_menu.addAction(load1_action)
+
+        load2_action = QAction("Load Image 2", self)
+        load2_action.triggered.connect(lambda: self.load_image(2))
+        file_menu.addAction(load2_action)
+
+        file_menu.addSeparator()
+
+        export_json_action = QAction("Export JSON", self)
+        export_json_action.triggered.connect(self.export_json)
+        file_menu.addAction(export_json_action)
+
+        export_pdf_action = QAction("Export PDF", self)
+        export_pdf_action.triggered.connect(self.export_pdf)
+        file_menu.addAction(export_pdf_action)
+
+        file_menu.addSeparator()
+
+        batch_action = QAction("Batch Compare...", self)
+        batch_action.triggered.connect(self.batch_compare)
+        file_menu.addAction(batch_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
 
     def setup_ui(self):
         """Create user interface"""
@@ -372,11 +439,11 @@ class MainWindow(QMainWindow):
 
         # Top buttons
         button_layout = QHBoxLayout()
-        btn_load1 = QPushButton("📁 Load Image 1")
+        btn_load1 = QPushButton("📂 Load Image 1")
         btn_load1.clicked.connect(lambda: self.load_image(1))
         button_layout.addWidget(btn_load1)
 
-        btn_load2 = QPushButton("📁 Load Image 2")
+        btn_load2 = QPushButton("📂 Load Image 2")
         btn_load2.clicked.connect(lambda: self.load_image(2))
         button_layout.addWidget(btn_load2)
 
@@ -384,9 +451,13 @@ class MainWindow(QMainWindow):
         btn_compare.clicked.connect(self.compare_images)
         button_layout.addWidget(btn_compare)
 
-        btn_export = QPushButton("📄 Export PDF Report")
-        btn_export.clicked.connect(self.export_pdf)
-        button_layout.addWidget(btn_export)
+        btn_export_json = QPushButton("💾 Export JSON")
+        btn_export_json.clicked.connect(self.export_json)
+        button_layout.addWidget(btn_export_json)
+
+        btn_export_pdf = QPushButton("📄 Export PDF")
+        btn_export_pdf.clicked.connect(self.export_pdf)
+        button_layout.addWidget(btn_export_pdf)
 
         btn_reset = QPushButton("🔄 Reset")
         btn_reset.clicked.connect(self.reset_view)
@@ -521,7 +592,7 @@ class MainWindow(QMainWindow):
         self.hist_label.setText(f"Histogram: {comparator.histogram_similarity:.2f}%")
         self.diff_label.setText(f"Differences: {len(comparator.differences)} regions")
 
-        # Color code SSIM (green=similar, yellow=medium, red=different)
+        # Color code SSIM
         if comparator.ssim_score > 90:
             self.ssim_label.setStyleSheet("font-weight: bold; padding: 5px; background-color: #90EE90;")
         elif comparator.ssim_score > 70:
@@ -538,26 +609,21 @@ class MainWindow(QMainWindow):
             return
 
         if mode == "Side by Side":
-            # Show original images with red boxes
             self.scene1.clear()
             self.scene2.clear()
 
-            # Reload original images
             item1 = QGraphicsPixmapItem(QPixmap(self.image_paths[1]))
             item2 = QGraphicsPixmapItem(QPixmap(self.image_paths[2]))
             self.scene1.addItem(item1)
             self.scene2.addItem(item2)
 
-            # Draw difference boxes
             self.draw_differences(self.comparator.differences)
 
         elif mode == "Overlay":
-            # Show overlay on both views
             if self.comparator.overlay_image:
                 self.scene1.clear()
                 self.scene2.clear()
 
-                # Convert PIL to QPixmap
                 overlay_array = np.array(self.comparator.overlay_image)
                 height, width, channel = overlay_array.shape
                 bytes_per_line = 3 * width
@@ -570,12 +636,10 @@ class MainWindow(QMainWindow):
                 self.scene2.addItem(item2)
 
         elif mode == "SSIM Heatmap":
-            # Show SSIM difference heatmap
             if self.comparator.ssim_image is not None:
                 self.scene1.clear()
                 self.scene2.clear()
 
-                # Apply colormap to SSIM image
                 ssim_colored = cv2.applyColorMap(self.comparator.ssim_image, cv2.COLORMAP_JET)
                 ssim_colored = cv2.cvtColor(ssim_colored, cv2.COLOR_BGR2RGB)
 
@@ -606,9 +670,28 @@ class MainWindow(QMainWindow):
                 diff['height']
             )
 
-            # Draw in both scenes
             self.scene1.addRect(rect, pen)
             self.scene2.addRect(rect, pen)
+
+    def export_json(self):
+        """Export comparison as JSON"""
+        if not self.comparator:
+            QMessageBox.warning(self, "Error", "Please compare images first!")
+            return
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export JSON Report",
+            f"comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            "JSON Files (*.json)"
+        )
+
+        if filename:
+            try:
+                self.comparator.export_json(filename)
+                QMessageBox.information(self, "Success", f"Report exported to:\n{filename}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to export JSON:\n{str(e)}")
 
     def export_pdf(self):
         """Export comparison as PDF report"""
@@ -616,11 +699,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Please compare images first!")
             return
 
-        # Ask for save location
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Export PDF Report",
-            f"comparison_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            f"comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
             "PDF Files (*.pdf)"
         )
 
@@ -628,8 +710,56 @@ class MainWindow(QMainWindow):
             try:
                 self.comparator.export_pdf_report(filename)
                 QMessageBox.information(self, "Success", f"Report exported to:\n{filename}")
+            except ImportError as e:
+                QMessageBox.critical(self, "Error", str(e))
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to export PDF:\n{str(e)}")
+
+    def batch_compare(self):
+        """Batch compare multiple image pairs"""
+        dialog = QFileDialog()
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.bmp *.gif)")
+
+        if dialog.exec():
+            files = dialog.selectedFiles()
+            if len(files) % 2 != 0:
+                QMessageBox.warning(self, "Error", "Please select an even number of images (pairs)!")
+                return
+
+            # Ask for output directory
+            output_dir = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+            if not output_dir:
+                return
+
+            # Process pairs
+            pairs = [(files[i], files[i + 1]) for i in range(0, len(files), 2)]
+            results = []
+
+            for i, (img1, img2) in enumerate(pairs):
+                self.progress_bar.show()
+                self.progress_bar.setValue(int((i / len(pairs)) * 100))
+
+                comparator = ImageComparator(img1, img2,
+                                             threshold=self.threshold_spin.value(),
+                                             min_area=self.min_area_spin.value())
+
+                if comparator.load_images():
+                    comparator.resize_images_to_match()
+                    comparator.calculate_histogram_similarity()
+                    comparator.calculate_ssim()
+                    comparator.find_differences_opencv()
+
+                    # Export JSON for each pair
+                    json_path = Path(output_dir) / f"comparison_{i + 1:03d}.json"
+                    comparator.export_json(json_path)
+                    results.append(comparator)
+
+            self.progress_bar.hide()
+            QMessageBox.information(self, "Success",
+                                    f"Batch comparison complete!\n"
+                                    f"Processed {len(pairs)} image pairs\n"
+                                    f"Results saved to: {output_dir}")
 
     def reset_view(self):
         """Reset the view"""

@@ -9,10 +9,12 @@ Features:
 - Marker categories/tags with custom colors
 - Text labels on markers
 - Relative coordinate system (resolution-independent)
-- CSV and JSON export
+- CSV and JSON export/import
+- Undo/Redo functionality
+- Marker search
 """
 import json
-import os
+import csv
 import sys
 from pathlib import Path
 from PyQt6 import QtWidgets, QtCore, QtGui
@@ -112,6 +114,11 @@ class MarkerManager:
         self.image_width = 1
         self.image_height = 1
 
+        # Undo/Redo stacks
+        self.history = []  # List of (action, data) tuples
+        self.future = []  # For redo
+        self.max_history = 100
+
     def _load_default_categories(self):
         """Load default marker categories"""
         categories = {}
@@ -137,30 +144,41 @@ class MarkerManager:
         self.image_width = max(1, width)
         self.image_height = max(1, height)
 
-    def add_marker(self, x, y, category_id='note', label='', description=''):
+    def add_marker(self, x, y, category_id='note', label='', description='', record_history=True):
         """Add a new marker with category, label, and relative coordinates"""
         marker = {
-            'x_rel': float(x / self.image_width),  # Relative (0-1)
-            'y_rel': float(y / self.image_height),  # Relative (0-1)
-            'x_abs': float(x),  # Absolute pixels (for current image)
-            'y_abs': float(y),  # Absolute pixels (for current image)
+            'x_rel': float(x / self.image_width),
+            'y_rel': float(y / self.image_height),
+            'x_abs': float(x),
+            'y_abs': float(y),
             'category': category_id,
             'label': label,
             'description': description,
             'id': len(self.markers)
         }
         self.markers.append(marker)
+
+        if record_history:
+            self._record_action('add', marker.copy())
+
         return marker
 
-    def update_marker(self, marker_id, label=None, description=None, category=None):
+    def update_marker(self, marker_id, label=None, description=None, category=None, record_history=True):
         """Update marker properties"""
         if 0 <= marker_id < len(self.markers):
+            if record_history:
+                old_marker = self.markers[marker_id].copy()
+
             if label is not None:
                 self.markers[marker_id]['label'] = label
             if description is not None:
                 self.markers[marker_id]['description'] = description
             if category is not None:
                 self.markers[marker_id]['category'] = category
+
+            if record_history:
+                self._record_action('update', {'old': old_marker, 'new': self.markers[marker_id].copy()})
+
             return True
         return False
 
@@ -171,25 +189,99 @@ class MarkerManager:
             marker['y_rel'] * self.image_height
         )
 
-    def remove_last(self):
+    def remove_last(self, record_history=True):
         """Remove the last marker"""
         if self.markers:
-            return self.markers.pop()
+            marker = self.markers.pop()
+            if record_history:
+                self._record_action('remove', marker)
+            return marker
         return None
 
-    def remove_marker(self, marker_id):
+    def remove_marker(self, marker_id, record_history=True):
         """Remove marker by ID"""
         if 0 <= marker_id < len(self.markers):
-            self.markers.pop(marker_id)
+            marker = self.markers.pop(marker_id)
             # Update remaining IDs
-            for i, marker in enumerate(self.markers):
-                marker['id'] = i
+            for i, m in enumerate(self.markers):
+                m['id'] = i
+
+            if record_history:
+                self._record_action('remove', marker)
             return True
         return False
 
-    def remove_all(self):
+    def remove_all(self, record_history=True):
         """Remove all markers"""
+        if record_history and self.markers:
+            self._record_action('remove_all', self.markers.copy())
         self.markers.clear()
+
+    def _record_action(self, action_type, data):
+        """Record action for undo/redo"""
+        self.history.append((action_type, data))
+        if len(self.history) > self.max_history:
+            self.history.pop(0)
+        self.future.clear()  # Clear redo stack on new action
+
+    def undo(self):
+        """Undo last action"""
+        if not self.history:
+            return None
+
+        action_type, data = self.history.pop()
+        self.future.append((action_type, data))
+
+        if action_type == 'add':
+            # Remove the added marker
+            self.markers.pop()
+        elif action_type == 'remove':
+            # Re-add the removed marker
+            self.markers.append(data)
+        elif action_type == 'remove_all':
+            # Restore all markers
+            self.markers = data.copy()
+        elif action_type == 'update':
+            # Restore old marker state
+            marker_id = data['old']['id']
+            if marker_id < len(self.markers):
+                self.markers[marker_id] = data['old']
+
+        return action_type
+
+    def redo(self):
+        """Redo last undone action"""
+        if not self.future:
+            return None
+
+        action_type, data = self.future.pop()
+        self.history.append((action_type, data))
+
+        if action_type == 'add':
+            # Re-add the marker
+            self.markers.append(data)
+        elif action_type == 'remove':
+            # Remove the marker again
+            marker_id = data['id']
+            if marker_id < len(self.markers):
+                self.markers.pop(marker_id)
+        elif action_type == 'remove_all':
+            # Clear all markers again
+            self.markers.clear()
+        elif action_type == 'update':
+            # Apply new marker state
+            marker_id = data['new']['id']
+            if marker_id < len(self.markers):
+                self.markers[marker_id] = data['new']
+
+        return action_type
+
+    def search_markers(self, query):
+        """Search markers by label or description"""
+        query_lower = query.lower()
+        return [m for m in self.markers
+                if query_lower in m.get('label', '').lower()
+                or query_lower in m.get('description', '').lower()]
 
     def save_to_file(self, image_path):
         """Save markers to JSON file"""
@@ -220,7 +312,7 @@ class MarkerManager:
                 },
                 'markers': self.markers,
                 'count': len(self.markers),
-                'version': '3.0'  # Version with categories and labels
+                'version': '3.0'
             }
 
             with open(filename, 'w', encoding='utf-8') as f:
@@ -249,7 +341,6 @@ class MarkerManager:
             with open(latest_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            # Validation
             if not isinstance(data, dict) or 'markers' not in data:
                 return False
 
@@ -281,7 +372,7 @@ class MarkerManager:
                     }
                     self.markers.append(new_marker)
             else:
-                # New format with categories and labels
+                # New format
                 self.markers = data['markers']
 
             return True
@@ -304,24 +395,59 @@ class MarkerManager:
             counter += 1
 
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write("ID,Category,Label,X_Relative,Y_Relative,X_Absolute,Y_Absolute,Description\n")
+            with open(filename, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID", "Category", "Label", "X_Relative", "Y_Relative",
+                                 "X_Absolute", "Y_Absolute", "Description"])
+
                 for marker in self.markers:
                     category = self.get_category(marker.get('category', 'note'))
-                    f.write(
-                        f"{marker['id']},"
-                        f"{category.name},"
-                        f'"{marker.get("label", "")}",'
-                        f"{marker['x_rel']:.6f},"
-                        f"{marker['y_rel']:.6f},"
-                        f"{marker['x_abs']:.2f},"
-                        f"{marker['y_abs']:.2f},"
-                        f'"{marker.get("description", "")}"\n'
-                    )
+                    writer.writerow([
+                        marker['id'],
+                        category.name,
+                        marker.get('label', ''),
+                        f"{marker['x_rel']:.6f}",
+                        f"{marker['y_rel']:.6f}",
+                        f"{marker['x_abs']:.2f}",
+                        f"{marker['y_abs']:.2f}",
+                        marker.get('description', '')
+                    ])
 
             return filename, None
         except Exception as e:
             return None, f"Error exporting: {e}"
+
+    def import_from_csv(self, csv_path):
+        """Import markers from CSV file"""
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                imported_count = 0
+
+                for row in reader:
+                    # Find category by name
+                    category_id = 'note'
+                    for cat_id, cat in self.categories.items():
+                        if cat.name == row['Category']:
+                            category_id = cat_id
+                            break
+
+                    # Use relative coordinates
+                    x = float(row['X_Relative']) * self.image_width
+                    y = float(row['Y_Relative']) * self.image_height
+
+                    self.add_marker(
+                        x, y,
+                        category_id=category_id,
+                        label=row.get('Label', ''),
+                        description=row.get('Description', ''),
+                        record_history=False  # Don't record during import
+                    )
+                    imported_count += 1
+
+                return imported_count, None
+        except Exception as e:
+            return 0, f"Error importing: {e}"
 
 
 class MarkerEditDialog(QtWidgets.QDialog):
@@ -442,17 +568,21 @@ class ImageMarker(QtWidgets.QMainWindow):
         file_layout = QtWidgets.QVBoxLayout()
         file_group.setLayout(file_layout)
 
-        self.open_btn = QtWidgets.QPushButton("📁 Open Image")
+        self.open_btn = QtWidgets.QPushButton("📂 Open Image")
         self.open_btn.clicked.connect(self.open_file)
         file_layout.addWidget(self.open_btn)
 
-        self.save_btn = QtWidgets.QPushButton("💾 Save (JSON)")
+        self.save_btn = QtWidgets.QPushButton("💾 Save JSON")
         self.save_btn.clicked.connect(self.save_markers)
         file_layout.addWidget(self.save_btn)
 
-        self.export_csv_btn = QtWidgets.QPushButton("📊 Export (CSV)")
+        self.export_csv_btn = QtWidgets.QPushButton("📊 Export CSV")
         self.export_csv_btn.clicked.connect(self.export_csv)
         file_layout.addWidget(self.export_csv_btn)
+
+        self.import_csv_btn = QtWidgets.QPushButton("📥 Import CSV")
+        self.import_csv_btn.clicked.connect(self.import_csv)
+        file_layout.addWidget(self.import_csv_btn)
 
         layout.addWidget(file_group)
 
@@ -479,6 +609,17 @@ class ImageMarker(QtWidgets.QMainWindow):
         marker_group = QtWidgets.QGroupBox("Markers")
         marker_layout = QtWidgets.QVBoxLayout()
         marker_group.setLayout(marker_layout)
+
+        # Undo/Redo buttons
+        undo_redo_layout = QtWidgets.QHBoxLayout()
+        self.undo_btn = QtWidgets.QPushButton("↶ Undo")
+        self.undo_btn.clicked.connect(self.undo_action)
+        undo_redo_layout.addWidget(self.undo_btn)
+
+        self.redo_btn = QtWidgets.QPushButton("↷ Redo")
+        self.redo_btn.clicked.connect(self.redo_action)
+        undo_redo_layout.addWidget(self.redo_btn)
+        marker_layout.addLayout(undo_redo_layout)
 
         self.remove_last_btn = QtWidgets.QPushButton("↩ Remove Last")
         self.remove_last_btn.clicked.connect(self.remove_last_marker)
@@ -513,6 +654,18 @@ class ImageMarker(QtWidgets.QMainWindow):
 
         layout.addWidget(settings_group)
 
+        # Search box
+        search_group = QtWidgets.QGroupBox("Search")
+        search_layout = QtWidgets.QVBoxLayout()
+        search_group.setLayout(search_layout)
+
+        self.search_input = QtWidgets.QLineEdit()
+        self.search_input.setPlaceholderText("Search markers...")
+        self.search_input.textChanged.connect(self.on_search_changed)
+        search_layout.addWidget(self.search_input)
+
+        layout.addWidget(search_group)
+
         # Marker list with filter
         list_group = QtWidgets.QGroupBox("Marker List")
         list_layout = QtWidgets.QVBoxLayout()
@@ -538,7 +691,7 @@ class ImageMarker(QtWidgets.QMainWindow):
         layout.addWidget(list_group)
 
         # Info label
-        self.info_label = QtWidgets.QLabel("Load an image to mark")
+        self.info_label = QtWidgets.QLabel("Load an image to start marking")
         self.info_label.setWordWrap(True)
         self.info_label.setStyleSheet("padding: 10px; background: #f0f0f0;")
         layout.addWidget(self.info_label)
@@ -551,7 +704,11 @@ class ImageMarker(QtWidgets.QMainWindow):
         """Set up keyboard shortcuts"""
         # Ctrl+Z for Undo
         undo_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Z"), self)
-        undo_shortcut.activated.connect(self.remove_last_marker)
+        undo_shortcut.activated.connect(self.undo_action)
+
+        # Ctrl+Y for Redo
+        redo_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
+        redo_shortcut.activated.connect(self.redo_action)
 
         # Ctrl+O for Open
         open_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+O"), self)
@@ -564,6 +721,10 @@ class ImageMarker(QtWidgets.QMainWindow):
         # Delete for remove all
         delete_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Delete"), self)
         delete_shortcut.activated.connect(self.remove_all_markers)
+
+        # Ctrl+F for search
+        search_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+F"), self)
+        search_shortcut.activated.connect(lambda: self.search_input.setFocus())
 
         # Number keys 1-5 for quick category selection
         for i in range(1, 6):
@@ -584,6 +745,27 @@ class ImageMarker(QtWidgets.QMainWindow):
             f"font-size: 36pt; color: {color};"
         )
 
+    def on_search_changed(self, text):
+        """Handle search input change"""
+        if not text:
+            self.update_marker_list()
+            return
+
+        # Search and update list
+        results = self.marker_manager.search_markers(text)
+        self.marker_list.clear()
+
+        for marker in results:
+            category = self.marker_manager.get_category(marker.get('category', 'note'))
+            x, y = self.marker_manager.get_absolute_coords(marker)
+            label = marker.get('label', '')
+
+            item_text = f"#{marker['id'] + 1} [{category.name}] {label} ({x:.1f}, {y:.1f})"
+            item = QtWidgets.QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, marker['id'])
+            item.setForeground(QtGui.QBrush(category.color))
+            self.marker_list.addItem(item)
+
     def open_file(self):
         """Open an image"""
         dialog = QtWidgets.QFileDialog(self)
@@ -602,7 +784,7 @@ class ImageMarker(QtWidgets.QMainWindow):
         # Clear scene
         self.scene.clear()
         self.marker_items.clear()
-        self.marker_manager.remove_all()
+        self.marker_manager.remove_all(record_history=False)
         self.marker_list.clear()
 
         # Load image
@@ -626,7 +808,8 @@ class ImageMarker(QtWidgets.QMainWindow):
         if self.marker_manager.load_from_file(filepath):
             self.redraw_all_markers()
             self.info_label.setText(
-                f"Image loaded\n{len(self.marker_manager.markers)} markers restored"
+                f"Image loaded: {Path(filepath).name}\n"
+                f"{len(self.marker_manager.markers)} markers restored"
             )
         else:
             self.info_label.setText(f"Image loaded: {Path(filepath).name}")
@@ -646,7 +829,7 @@ class ImageMarker(QtWidgets.QMainWindow):
             marker = self.marker_manager.add_marker(
                 x, y,
                 category_id=self.current_category,
-                label=f"M{len(self.marker_manager.markers) + 1}"
+                label=f"M{len(self.marker_manager.markers)}"
             )
 
             self.draw_marker(marker)
@@ -772,6 +955,24 @@ class ImageMarker(QtWidgets.QMainWindow):
             x, y = self.marker_manager.get_absolute_coords(marker)
             self.view.centerOn(x, y)
 
+    def undo_action(self):
+        """Undo last action"""
+        action = self.marker_manager.undo()
+        if action:
+            self.redraw_all_markers()
+            self.info_label.setText(f"Undone: {action}")
+        else:
+            self.info_label.setText("Nothing to undo")
+
+    def redo_action(self):
+        """Redo last undone action"""
+        action = self.marker_manager.redo()
+        if action:
+            self.redraw_all_markers()
+            self.info_label.setText(f"Redone: {action}")
+        else:
+            self.info_label.setText("Nothing to redo")
+
     def remove_last_marker(self):
         """Remove the last marker"""
         marker = self.marker_manager.remove_last()
@@ -836,6 +1037,30 @@ class ImageMarker(QtWidgets.QMainWindow):
                 self, "Exported",
                 f"CSV exported:\n{filename}"
             )
+
+    def import_csv(self):
+        """Import markers from CSV"""
+        if not self.current_image_path:
+            QtWidgets.QMessageBox.warning(self, "Error", "No image loaded!")
+            return
+
+        dialog = QtWidgets.QFileDialog(self)
+        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+        dialog.setNameFilter("CSV Files (*.csv)")
+
+        if dialog.exec():
+            csv_path = dialog.selectedFiles()[0]
+            count, error = self.marker_manager.import_from_csv(csv_path)
+
+            if error:
+                QtWidgets.QMessageBox.warning(self, "Error", error)
+            else:
+                self.redraw_all_markers()
+                QtWidgets.QMessageBox.information(
+                    self, "Imported",
+                    f"Successfully imported {count} markers"
+                )
+                self.info_label.setText(f"Imported {count} markers from CSV")
 
     def update_marker_size(self, value):
         """Update marker size"""
