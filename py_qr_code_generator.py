@@ -27,24 +27,6 @@ from PyQt6.QtGui import QPixmap, QColor
 from PyQt6.QtCore import Qt
 
 
-def json_file_read(filename: str) -> dict:
-    """Read JSON file and return content as dict.
-
-    :param filename: Path to file
-    :return: Dictionary with data or empty dict on error
-    """
-    path = Path(filename)
-    if not path.exists():
-        print(f"Warning: Configuration file '{filename}' not found.")
-        return {}
-
-    try:
-        with open(path, mode='r', encoding='utf-8') as file:
-            return json.load(file)
-    except Exception as e:
-        print(f"Error reading JSON: {e}")
-        return {}
-
 
 class QRGeneratorGUI(QMainWindow):
     """Enhanced QR Code Generator with GUI"""
@@ -52,11 +34,6 @@ class QRGeneratorGUI(QMainWindow):
     def __init__(self):
         """Initialize QR Generator GUI"""
         super().__init__()
-
-        # Load configuration
-        base_path = Path(__file__).parent
-        config_path = base_path / "config" / "config.json"
-        self.data = json_file_read(str(config_path))
 
         # Current QR code image
         self.current_pil_image = None
@@ -71,17 +48,8 @@ class QRGeneratorGUI(QMainWindow):
 
     def setup_window(self):
         """Setup main window properties"""
-        self.setWindowTitle(self.data.get("main_window_name", "QR Code Generator"))
+        self.setWindowTitle("QR Code Generator")
         self.resize(700, 800)
-
-        # Set icon if available
-        icon_path = self.data.get("icon")
-        if icon_path:
-            base_path = Path(__file__).parent
-            full_icon_path = base_path / icon_path
-            if full_icon_path.exists():
-                from PyQt6.QtGui import QIcon
-                self.setWindowIcon(QIcon(str(full_icon_path)))
 
     def setup_ui(self):
         """Create user interface"""
@@ -115,7 +83,7 @@ class QRGeneratorGUI(QMainWindow):
         # Input text
         input_layout = QVBoxLayout()
         input_layout.addWidget(QLabel("Content:"))
-        self.textbox = QLineEdit(self.data.get("textbox", "https://example.com"))
+        self.textbox = QLineEdit("https://example.com")
         self.textbox.setPlaceholderText("Enter URL or text here...")
         self.textbox.returnPressed.connect(self.generate_qr)
         input_layout.addWidget(self.textbox)
@@ -344,7 +312,7 @@ class QRGeneratorGUI(QMainWindow):
             if not self.current_pil_image:
                 return
 
-        default_name = self.data.get("filename", "qrcode.png")
+        default_name = "qrcode.png"
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
