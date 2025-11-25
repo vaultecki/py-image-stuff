@@ -13,7 +13,6 @@ Features:
 - Size options
 """
 import sys
-import json
 from pathlib import Path
 import qrcode
 from PIL import Image, ImageQt
@@ -27,7 +26,6 @@ from PyQt6.QtGui import QPixmap, QColor
 from PyQt6.QtCore import Qt
 
 
-
 class QRGeneratorGUI(QMainWindow):
     """Enhanced QR Code Generator with GUI"""
 
@@ -39,12 +37,14 @@ class QRGeneratorGUI(QMainWindow):
         self.current_pil_image = None
         self.current_decoded_data = None
 
-        # Setup UI
+        # Setup UI first
         self.setup_window()
         self.setup_ui()
 
-        # Generate initial QR code
-        self.generate_qr()
+        # Generate initial QR code AFTER UI is ready
+        # Use QTimer to delay generation until after window is shown
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self.generate_qr)
 
     def setup_window(self):
         """Setup main window properties"""
@@ -258,6 +258,7 @@ class QRGeneratorGUI(QMainWindow):
         """Generate QR code with current settings"""
         text = self.textbox.text()
         if not text:
+            self.info_label.setText("Please enter some text to generate QR code")
             return
 
         try:
@@ -272,10 +273,13 @@ class QRGeneratorGUI(QMainWindow):
             qr.make(fit=True)
 
             # Generate image with colors
-            self.current_pil_image = qr.make_image(
+            qr_img = qr.make_image(
                 fill_color=self.fg_color.name(),
                 back_color=self.bg_color.name()
             )
+
+            # Convert to PIL Image (in case it's not already)
+            self.current_pil_image = qr_img.convert('RGB')
 
             # Display in GUI
             self.display_image(self.current_pil_image)
@@ -288,22 +292,32 @@ class QRGeneratorGUI(QMainWindow):
             )
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to generate QR code:\n{str(e)}")
+            error_msg = f"Failed to generate QR code: {str(e)}"
+            self.info_label.setText(error_msg)
+            QMessageBox.critical(self, "Error", error_msg)
+            print(f"ERROR: {error_msg}")  # Debug output
+            import traceback
+            traceback.print_exc()  # Print full stack trace for debugging
 
     def display_image(self, pil_image):
         """Display PIL image in label"""
-        # Convert PIL to QPixmap
-        qt_image = ImageQt.ImageQt(pil_image)
-        pixmap = QPixmap.fromImage(qt_image)
+        try:
+            # Convert PIL to QPixmap
+            qt_image = ImageQt.ImageQt(pil_image)
+            pixmap = QPixmap.fromImage(qt_image)
 
-        # Scale to fit label while maintaining aspect ratio
-        scaled_pixmap = pixmap.scaled(
-            self.img_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
+            # Scale to fit label while maintaining aspect ratio
+            scaled_pixmap = pixmap.scaled(
+                self.img_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
 
-        self.img_label.setPixmap(scaled_pixmap)
+            self.img_label.setPixmap(scaled_pixmap)
+        except Exception as e:
+            print(f"Error displaying image: {e}")
+            import traceback
+            traceback.print_exc()
 
     def save_qr(self):
         """Save current QR code"""
@@ -430,10 +444,13 @@ class QRGeneratorGUI(QMainWindow):
                     qr.add_data(text)
                     qr.make(fit=True)
 
-                    img = qr.make_image(
+                    qr_img = qr.make_image(
                         fill_color=self.fg_color.name(),
                         back_color=self.bg_color.name()
                     )
+
+                    # Convert to PIL Image
+                    img = qr_img.convert('RGB')
 
                     # Save with index
                     output_file = output_path / f"qr_{i + 1:04d}.png"
@@ -465,3 +482,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
